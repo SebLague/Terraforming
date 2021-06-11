@@ -1,0 +1,41 @@
+﻿Texture2D<float4> Source;
+RWTexture2D<float4> Target;
+RWTexture2D<float4> HorizontalPassTexture;
+StructuredBuffer<float> kernelValues;
+uint width;
+uint height;
+uint kernelSize;
+
+#pragma kernel HorizontalPass
+
+[numthreads(8,8,1)]
+void HorizontalPass (uint3 id : SV_DispatchThreadID)
+{
+	if (id.x < 0 || id.x >= width || id.y < 0 || id.y >= height) {
+		return;
+	}
+
+	float4 colour = 0;
+	for (uint i = 0; i < kernelSize; i ++) {
+		int x = min(max(0, id.x - kernelSize/2 + i), width-1);
+		colour += Source[int2(x, id.y)] * kernelValues[i];
+	}
+	HorizontalPassTexture[id.xy] = colour;
+}
+
+#pragma kernel VerticalPass
+
+[numthreads(8,8,1)]
+void VerticalPass (uint3 id : SV_DispatchThreadID)
+{
+	if (id.x < 0 || id.x >= width || id.y < 0 || id.y >= height) {
+		return;
+	}
+
+	float4 colour = 0;
+	for (uint i = 0; i < kernelSize; i ++) {
+		int y = min(max(0, id.y - kernelSize/2 + i), height-1);
+		colour += HorizontalPassTexture[int2(id.x, y)] * kernelValues[i];
+	}
+	Target[id.xy] = colour;
+}

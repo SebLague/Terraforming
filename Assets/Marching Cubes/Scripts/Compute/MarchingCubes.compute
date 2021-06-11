@@ -1,0 +1,152 @@
+﻿#pragma kernel ProcessCube
+#include "/Includes/MarchTables.compute"
+
+struct Vertex {
+	float3 position;
+	float3 normal;
+	int2 id;
+};
+
+struct Triangle {
+	Vertex vertexC;
+	Vertex vertexB;
+	Vertex vertexA;
+};
+//
+AppendStructuredBuffer<Triangle> triangles;
+RWTexture3D<float> DensityTexture;
+int textureSize;
+
+int numPointsPerAxis;
+float planetSize;
+float isoLevel;
+float3 chunkCoord;
+
+float3 coordToWorld(int3 coord) {
+	return (coord / (textureSize - 1.0) - 0.5f) * planetSize;
+}
+
+int indexFromCoord(int3 coord) {
+	coord = coord - int3(chunkCoord);
+	return coord.z * numPointsPerAxis * numPointsPerAxis + coord.y * numPointsPerAxis + coord.x;
+}
+
+float sampleDensity(int3 coord) {
+	coord = max(0, min(coord, textureSize));
+	return DensityTexture[coord];
+}
+
+float3 calculateNormal(int3 coord) {
+	int3 offsetX = int3(1, 0, 0);
+	int3 offsetY = int3(0, 1, 0);
+	int3 offsetZ = int3(0, 0, 1);
+
+	float dx = sampleDensity(coord + offsetX) - sampleDensity(coord - offsetX);
+	float dy = sampleDensity(coord + offsetY) - sampleDensity(coord - offsetY);
+	float dz = sampleDensity(coord + offsetZ) - sampleDensity(coord - offsetZ);
+
+	return normalize(float3(dx, dy, dz));
+}
+
+// Calculate the position of the vertex
+// The position lies somewhere along the edge defined by the two corner points.
+// Where exactly along the edge is determined by the values of each corner point.
+Vertex createVertex(int3 coordA, int3 coordB) {
+	
+	float3 posA = coordToWorld(coordA);
+	float3 posB = coordToWorld(coordB);
+	float densityA = sampleDensity(coordA);
+	float densityB = sampleDensity(coordB);
+
+	// Interpolate between the two corner points based on the density
+	float t = (isoLevel - densityA) / (densityB - densityA);
+	float3 position = posA + t * (posB - posA);
+
+	// Normal:
+	float3 normalA = calculateNormal(coordA);
+	float3 normalB = calculateNormal(coordB);
+	float3 normal = normalize(normalA + t * (normalB - normalA));
+
+	// ID
+	int indexA = indexFromCoord(coordA);
+	int indexB = indexFromCoord(coordB);
+
+	// Create vertex
+	Vertex vertex;
+	vertex.position = position;
+	vertex.normal = normal;
+	vertex.id = int2(min(indexA, indexB), max(indexA, indexB));
+
+	return vertex;
+}
+
+[numthreads(8,8,8)]
+void ProcessCube (int3 id : SV_DispatchThreadID)
+{   
+	int numCubesPerAxis = numPointsPerAxis - 1;
+	if (id.x >= numCubesPerAxis || id.y >= numCubesPerAxis || id.z >= numCubesPerAxis) {
+		return;
+	}
+
+	int3 coord = id + int3(chunkCoord);
+
+	// Calculate coordinates of each corner of the current cube
+	int3 cornerCoords[8];
+	cornerCoords[0] = coord + int3(0, 0, 0);
+	cornerCoords[1] = coord + int3(1, 0, 0);
+	cornerCoords[2] = coord + int3(1, 0, 1);
+	cornerCoords[3] = coord + int3(0, 0, 1);
+	cornerCoords[4] = coord + int3(0, 1, 0);
+	cornerCoords[5] = coord + int3(1, 1, 0);
+	cornerCoords[6] = coord + int3(1, 1, 1);
+	cornerCoords[7] = coord + int3(0, 1, 1);
+
+	// Calculate unique index for each cube configuration.
+	// There are 256 possible values (cube has 8 corners, so 2^8 possibilites).
+	// A value of 0 means cube is entirely inside the surface; 255 entirely outside.
+	// The value is used to look up the edge table, which indicates which edges of the cube the surface passes through.
+	int cubeConfiguration = 0;
+	for (int i = 0; i < 8; i ++) {
+		// Think of the configuration as an 8-bit binary number (each bit represents the state of a corner point).
+		// The state of each corner point is either 0: above the surface, or 1: below the surface.
+		// The code below sets the corresponding bit to 1, if the point is below the surface.
+		if (sampleDensity(cornerCoords[i]) < isoLevel) {
+			cubeConfiguration |= (1 << i);
+		}
+	}
+	
+	// Get array of the edges of the cube that the surface passes through.
+	int edgeIndices[] = triangulation[cubeConfiguration];
+
+	// Create triangles for the current cube configuration
+	for (i = 0; i < 16; i += 3) {
+		// If edge index is -1, then no further vertices exist in this configuration
+		if (edgeIndices[i] == -1) { break; }
+
+		// Get indices of the two corner points defining the edge that the surface passes through.
+		// (Do this for each of the three edges we're currently looking at).
+		int edgeIndexA = edgeIndices[i];
+		int a0 = cornerIndexAFromEdge[edgeIndexA];
+		int a1 = cornerIndexBFromEdge[edgeIndexA];
+
+		int edgeIndexB = edgeIndices[i+1];
+		int b0 = cornerIndexAFromEdge[edgeIndexB];
+		int b1 = cornerIndexBFromEdge[edgeIndexB];
+
+		int edgeIndexC = edgeIndices[i+2];
+		int c0 = cornerIndexAFromEdge[edgeIndexC];
+		int c1 = cornerIndexBFromEdge[edgeIndexC];
+
+		// Calculate positions of each vertex.
+		Vertex vertexA = createVertex(cornerCoords[a0], cornerCoords[a1]);
+		Vertex vertexB = createVertex(cornerCoords[b0], cornerCoords[b1]);
+		Vertex vertexC = createVertex(cornerCoords[c0], cornerCoords[c1]);
+
+		// Create triangle
+		Triangle tri;
+		tri.vertexA = vertexC;
+		tri.vertexB = vertexB;
+		tri.vertexC = vertexA;
+		triangles.Append(tri);
+	}
+}

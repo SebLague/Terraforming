@@ -1,0 +1,41 @@
+#pragma kernel Blur
+
+RWTexture3D<float> Source;
+RWTexture3D<float> Result;
+int blurRadius;
+int textureSize;
+int brushRadius;
+int3 brushCentre;
+
+
+[numthreads(8,8,8)]
+void Blur (int3 id : SV_DispatchThreadID)
+{
+	id = id + brushCentre;
+	if (id.x >= textureSize || id.y >= textureSize || id.z >= textureSize) {
+		return;
+	}
+
+	float sum = 0;
+	float totalWeight = 0;
+
+	for (int z = -blurRadius; z <= blurRadius; z ++) {
+		for (int y = -blurRadius; y <= blurRadius; y ++) {
+			for (int x = -blurRadius; x <= blurRadius; x ++) {
+				float dst = length(float3(x,y,z)) / blurRadius;
+				float weight = pow(2.5, -10*dst);
+				int3 samplePos = id + int3(x,y,z);
+				samplePos = max(0, min(samplePos, textureSize));
+				sum += Source[samplePos] * weight;
+				totalWeight += weight;
+			}
+		}
+	}
+
+	//int n = 2 * blurRadius + 1;
+	//int iterations = n * n * n;
+	float average = sum / totalWeight;
+	Result[id] = average;
+	//Result[id] = Source[id];
+}
+

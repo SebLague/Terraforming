@@ -1,0 +1,114 @@
+#pragma kernel CSMain
+
+RWTexture2D<float4> Result;
+int textureSize;
+int numOutScatteringSteps;
+float atmosphereRadius;
+float avgDensityHeight01;
+float densityFalloff;
+float4 params;
+
+static const float PI = 3.1415;
+
+// Returns vector (dstToSphere, dstThroughSphere)
+// If ray origin is inside sphere, dstToSphere = 0
+// If ray misses sphere, dstToSphere = maxValue; dstThroughSphere = 0
+float2 raySphere(float3 sphereCentre, float sphereRadius, float3 rayOrigin, float3 rayDir) {
+	float3 offset = rayOrigin - sphereCentre;
+	float a = 1; // Set to dot(rayDir, rayDir) if rayDir might not be normalized
+	float b = 2 * dot(offset, rayDir);
+	float c = dot (offset, offset) - sphereRadius * sphereRadius;
+	float d = b * b - 4 * a * c; // Discriminant from quadratic formula
+
+	// Number of intersections: 0 when d < 0; 1 when d = 0; 2 when d > 0
+	if (d > 0) {
+		float s = sqrt(d);
+		float dstToSphereNear = max(0, (-b - s) / (2 * a));
+		float dstToSphereFar = (-b + s) / (2 * a);
+
+		// Ignore intersections that occur behind the ray
+		if (dstToSphereFar >= 0) {
+			return float2(dstToSphereNear, dstToSphereFar - dstToSphereNear);
+		}
+	}
+	// Ray did not intersect sphere
+	static const float maxFloat = 3.402823466e+38;
+	return float2(maxFloat, 0);
+}
+
+float densityAtPoint(float2 densitySamplePoint) {
+	float planetRadius = 1;
+	float2 planetCentre = 0;
+
+	float heightAboveSurface = length(densitySamplePoint - planetCentre) - planetRadius;
+	float height01 = heightAboveSurface / (atmosphereRadius - planetRadius);
+	float localDensity = exp(-height01 * densityFalloff) * (1 - height01);
+	return localDensity;
+}
+
+float opticalDepth(float2 rayOrigin, float2 rayDir, float rayLength) {
+	int numOpticalDepthPoints = numOutScatteringSteps;
+
+	float2 densitySamplePoint = rayOrigin;
+	float stepSize = rayLength / (numOpticalDepthPoints - 1);
+	float opticalDepth = 0;
+
+	for (int i = 0; i < numOpticalDepthPoints; i ++) {
+		float localDensity = densityAtPoint(densitySamplePoint);
+		opticalDepth += localDensity * stepSize;
+		densitySamplePoint += rayDir * stepSize;
+	}
+	return opticalDepth;
+}
+
+
+float calculateOutScattering(float2 inPoint, float2 outPoint) {
+	float planetRadius = 1;
+	float skinWidth = planetRadius / 1000.0;
+	
+
+	float lightTravelDst = length(outPoint - inPoint);
+	float2 outScatterPoint = inPoint;
+	float2 rayDir = (outPoint - inPoint) / lightTravelDst;
+	float stepSize = (lightTravelDst - skinWidth) / (numOutScatteringSteps);
+	
+	float outScatterAmount = 0;
+
+	for (int i = 0; i < numOutScatteringSteps; i ++) {
+		outScatterPoint += rayDir * stepSize;
+
+		// height at planet surface = 0, at furthest extent of atmosphere = 1
+		float height = length(outScatterPoint - 0) - planetRadius;//
+
+	
+		
+		float height01 = saturate(height / (atmosphereRadius - planetRadius));
+		outScatterAmount += exp(-height01 * densityFalloff) * stepSize;
+		
+	}
+
+	return outScatterAmount;
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint2 id : SV_DispatchThreadID)
+{
+	const float planetRadius = 1;
+
+	float2 uv = id / (float)textureSize;
+	float height01 = uv.y;
+	float angle = uv.x * PI;
+	//angle = (1-cos(angle))/2;
+	float2 dir = float2(sin(angle), cos(angle));
+	float y = -2 * uv.x + 1;
+	float x = sin(acos(y));
+	dir = float2(x,y);
+	
+	float2 inPoint = float2(0, lerp(planetRadius, atmosphereRadius, height01));
+	float dstThroughAtmosphere = raySphere(0, atmosphereRadius, float3(inPoint,0), float3(dir,0)).y;
+	float2 outPoint = inPoint + dir * raySphere(0, atmosphereRadius, float3(inPoint,0), float3(dir,0)).y;
+	//float outScattering = calculateOutScattering(inPoint, outPoint);
+	float outScattering = opticalDepth(inPoint + dir * 0.0001, dir, dstThroughAtmosphere-0.0002);
+
+	Result[id.xy] = outScattering;
+}
